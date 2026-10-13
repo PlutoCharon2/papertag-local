@@ -1,0 +1,14 @@
+// Desktop bridge only opens native pickers and the official login page.
+function nativeAPI(){return window.pywebview?.api;}
+async function exportData(format){const res=await fetch('/api/export/'+format,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(searchBody())});if(!res.ok)throw Error('导出失败');const text=await res.text();if(nativeAPI()){await nativeAPI().save_text('papers.'+format,text);return}const url=URL.createObjectURL(new Blob([text],{type:format==='csv'?'text/csv':'application/json'}));const el=document.createElement('a');el.href=url;el.download='papers.'+format;el.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+$('#chatLogin').onclick=action(async()=>{if(nativeAPI())await nativeAPI().open_chatgpt();else window.open('https://chatgpt.com/','_blank','noopener');});
+$('#choosePDFs').onclick=action(async()=>{if(!nativeAPI()){notify('请启动桌面版使用原生文件选择框；浏览器版可在下方输入完整路径。');return}const paths=await nativeAPI().choose_pdfs();if(paths.length){await api('/import',{paths});notify(`已提交 ${paths.length} 个 PDF，只处理内容变化的文件`);await loadJobs()}});
+$('#chooseFolder').onclick=action(async()=>{if(!nativeAPI()){notify('请启动桌面版使用原生文件夹选择框；浏览器版可输入完整路径。');return}const path=await nativeAPI().choose_folder();if(path){$('#folderPath').value=path;await api('/import',{path});notify('文件夹已加入本地更新范围');await loadJobs()}});
+async function updateLibrary(){await api('/update',{});showPage('import');notify('正在本地核对哈希；相同内容直接复用已有标签。');await loadJobs()}
+$('#updateLibrary').onclick=action(updateLibrary);$('#updateFromImport').onclick=action(updateLibrary);$('#pendingOnly').onchange=action(loadPapers);
+document.addEventListener('click',action(async e=>{const link=e.target.closest('a');if(!link||!nativeAPI())return;const url=new URL(link.href,location.href);const match=url.pathname.match(/^\/api\/papers\/(\d+)\/(packet|pdf)$/);if(!match)return;e.preventDefault();if(match[2]==='pdf'){await nativeAPI().open_pdf(Number(match[1]));return}const res=await fetch(url);if(!res.ok){notify('没有可用解析文本，请先检查 PDF');return}const path=await nativeAPI().save_text(`paper-${match[1]}-chat.md`,await res.text());if(path)notify('聊天材料已保存：'+path)}));
+window.addEventListener('pywebviewready',()=>{$('.offline').textContent='● Win11 桌面版 · 本地存储'});
+document.addEventListener('click',action(async e=>{const link=e.target.closest('a');if(!link||!nativeAPI())return;const match=new URL(link.href).pathname.match(/^\/api\/papers\/(\d+)\/bundle$/);if(match){e.preventDefault();const path=await nativeAPI().save_bundle(Number(match[1]));if(path)notify('已保存原始 PDF 与分析要求：'+path)}}));
+$('nav [data-page="library"]').addEventListener('click',action(loadPapers));
+$('#clearFilters').addEventListener('click',()=>{$('#pendingOnly').checked=false});
+action(async()=>{const info=await api('/settings');$('#storageInfo').textContent='本地数据位置：'+info.data_directory})();
