@@ -4,6 +4,8 @@ __pycache__/
 data/
 tmp/
 build/
+!frontend/pdfjs/build/
+!frontend/pdfjs/build/**
 dist/
 *.spec
 desktop-smoke.json

@@ -41,6 +41,9 @@ class Analysis(StrictModel):
     authors: list[str]
     year: int | None = Field(default=None, ge=1500, le=2200)
     doi: str = ''
+    journal: str = Field(default='', max_length=500)
+    journal_abbreviation: str = Field(default='', max_length=100)
+    publication_kind: Literal['journal', 'conference', 'book', 'preprint', 'thesis', 'other', 'unknown'] = 'unknown'
     paper_type: Literal['theory', 'empirical', 'review', 'mixed', 'unknown']
     summary: str = Field(max_length=6000)
     tags: list[Tag]
@@ -111,3 +114,7 @@ class APIProfile(StrictModel):
     model: str = Field(min_length=1, max_length=150)
     api_key: str = Field(default='', max_length=1000)
     clear_key: bool = False
+
+
+class JournalInput(StrictModel):
+    journal: str = Field(max_length=500)

@@ -14,6 +14,7 @@ from .analysis_service import validate_analysis
 from .archive_service import archived_pdf, archive_pdf
 from .pdf_service import file_hash
 from .result_validation import prepare
+from . import contents_service
 
 logger = logging.getLogger(__name__)
 _worker = None
@@ -83,7 +84,7 @@ def prompt_for(c, paper):
 只返回符合给定 JSON Schema 的结果。中文转述，evidence.quote 必须引用原文，block_id 一律为空字符串，page 填实际 PDF 页序。
 严格区分本文与引用工作、原系统与平均系统、精确与邻域、局部与全局、理论证明与实验观察。
 每条 claim 只对应同一方法/对象及其条件；不把不同算法的反馈和结果拼成一个结论。
-没有定理的论文不得编造定理。作者声称的空白不等于已证实空白。未说明的字段填 unknown 或空数组。
+没有定理的论文不得编造定理。作者声称的空白不等于已证实空白。未说明的字段填 unknown 或空数组。基础信息必须一并提取：标题、作者、发表年份、DOI、journal（期刊或会议全称）、journal_abbreviation（通用期刊/会议简称，英文字母一律大写）、publication_kind（journal/conference/book/preprint/thesis/other/unknown）。IEEE、Elsevier等出版机构不是具体刊名，不能只填IEEE。非期刊填写实际会议/书籍名称，不强行编造期刊。找不到填空字符串或unknown，禁止凭标题猜测简称。
 不要输出置信度或私人用途标签。schema_version 必须为2。保持下方标识字段完全不变。
 优先选择标签库中的稳定 id。如果缺少正确标签，在 new_labels 中提出新标签：
 key 为 new_ 开头的小写英文标识，dimension 为 topic/method/problem/feedback/system/result/application，
@@ -97,7 +98,14 @@ conditions、authors、label_ids、suggestions 等数组字段必须用 JSON 数
         {'paper_id': paper['id'], 'document_hash': paper['file_hash'], 'ontology_version': ontology_version(c), 'schema_version': 2}, ensure_ascii=False)
 
 
-def commit_result(c, paper, raw, baseline_run_id):
+def commit_result(c, paper, raw, baseline_run_id, contents_pages=None):
+    if contents_pages is not None:
+        raw = contents_service.restrict(raw, contents_pages)
+        data = json.loads(raw)
+        result_ids = {r['id'] for r in labels(c) if r['dimension'] == 'result'}
+        result_ids.update(p['key'] for p in data.get('new_labels', []) if p.get('dimension') == 'result')
+        if any(t.get('label_id') in result_ids for t in data.get('tags', [])):
+            raise ValueError('目录级分析不得生成结果维度标签')
     payload, issues = prepare(c, paper, raw)
     if payload['paper_id'] != paper['id'] or payload['document_hash'] != paper['file_hash']:
         raise ValueError('GPT 返回了错误的文献标识')
@@ -156,6 +164,9 @@ def commit_result(c, paper, raw, baseline_run_id):
         for evidence in item['evidence']:
             evidence['block_id'] = ''
     checked = validate_analysis(c, paper, json.dumps(payload, ensure_ascii=False))
+    if contents_pages is not None:
+        checked['_analysis_scope'] = 'contents'
+        checked['_source_pages'] = contents_pages
     if issues:
         checked['_validation_issues'] = issues
         checked['_partial'] = True
@@ -195,21 +206,39 @@ def analyze_one(job_id):
         workspace.mkdir(parents=True, exist_ok=True)
         patch_job(job_id, status='running', stage='准备 PDF 页面', error='', rendered=0)
         try:
-            if paper['page_count'] > config['max_pages']:
-                raise ValueError(f"PDF 有 {paper['page_count']} 页，超过自动分析上限 {config['max_pages']}。可在设置调整上限或使用手动聊天；文件已保留。")
+            contents_pages = None
             frames = []
             render_started = time.monotonic()
+            transport = codex_service if provider == 'codex' else api_service
+            def count_call():
+                with connect() as c:
+                    c.execute('UPDATE ai_jobs SET attempts=attempts+1 WHERE id=?', (job_id,))
             with pymupdf.open(snapshot) as doc:
-                for index, page in enumerate(doc, 1):
+                if len(doc) != paper['page_count']:
+                    raise ValueError('PDF 页数与本地记录不一致；未发起 API 调用')
+                if len(doc) > 30:
+                    patch_job(job_id, stage='AI 定位目录（仅预览前30页）')
+                    contents_pages = contents_service.locate(doc, workspace, transport, config['timeout'], config['model'], lambda: cancel_requested(job_id), count_call)
+                    (workspace / 'scope.json').write_text(json.dumps({'contents_pages': contents_pages}), encoding='utf-8')
+                    prompt = ('本次只分析目录。附件仅为目录页，图片依次对应真实 PDF 页序：' + json.dumps(contents_pages) +
+                              '。忽略下文关于完整全文和图片顺序从1开始的说明，使用此页序。只生成目录覆盖主题的标签和摘要；'
+                              'claims 必须为空数组，禁止生成理论、实验、贡献或性能结论，不使用 result 维度标签。'
+                              'summary 开头写“目录级分析”。paper_type 填 unknown，不凭目录推断作者年份。\n' + prompt)
+                    selected_pages = contents_pages
+                else:
+                    if len(doc) > config['max_pages']:
+                        raise ValueError('PDF 超过设置的全文分析页数上限；文件已保留')
+                    selected_pages = list(range(1, len(doc) + 1))
+                for rendered, index in enumerate(selected_pages, 1):
                     if cancel_requested(job_id):
                         raise ValueError('分析已暂停')
                     frame = workspace / f'page-{index:03}.png'
-                    page.get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6), alpha=False).save(frame)
+                    doc[index - 1].get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6), alpha=False).save(frame)
                     frames.append(frame)
-                    patch_job(job_id, rendered=index, stage=f'准备页面 {index}/{len(doc)}')
+                    patch_job(job_id, rendered=rendered, stage=f'准备目录页 {index}（{rendered}/{len(selected_pages)}）' if contents_pages is not None else f'准备页面 {index}/{len(doc)}')
             timing = {'render_seconds': round(time.monotonic() - render_started, 2)}
             (workspace / 'timing.json').write_text(json.dumps(timing), encoding='utf-8')
-            patch_job(job_id, stage='AI 正在阅读原始论文页面')
+            patch_job(job_id, stage='AI 正在分析目录' if contents_pages is not None else 'AI 正在阅读原始论文页面')
             response = workspace / 'response.json'
             if response.is_file():
                 raw = response.read_text(encoding='utf-8')
@@ -229,7 +258,7 @@ def analyze_one(job_id):
                 state = c.execute('SELECT status FROM ai_jobs WHERE id=?', (job_id,)).fetchone()
                 if not state or state[0] != 'running' or not configuration(c)['enabled']:
                     raise ValueError('分析已暂停，返回内容保留但不提交')
-                run = commit_result(c, paper, raw, prior)
+                run = commit_result(c, paper, raw, prior, contents_pages)
                 partial = c.execute('SELECT status FROM papers WHERE id=?', (paper['id'],)).fetchone()[0] == 'partial_result'
                 c.execute("UPDATE ai_jobs SET status=?,stage=?,run_id=?,finished_at=CURRENT_TIMESTAMP WHERE id=?", ('partial' if run and partial else 'completed' if run else 'cached', '部分保存，有内容待补充' if partial else '已保存 AI 结果' if run else '保留分析期间导入的结果', run, job_id))
             timing['save_seconds'] = round(time.monotonic() - save_started, 2)
@@ -267,7 +296,9 @@ def recheck_saved(job_id):
             # without inferring labels/pages or reviving deactivated labels.
             data = json.loads(raw)
             data['ontology_version'] = ontology_version(c)
-            run = commit_result(c, paper, json.dumps(data, ensure_ascii=False), prior)
+            scope_file = database.DB_PATH.parent / 'ai_jobs' / str(job_id) / 'scope.json'
+            contents_pages = json.loads(scope_file.read_text(encoding='utf-8'))['contents_pages'] if scope_file.is_file() else None
+            run = commit_result(c, paper, json.dumps(data, ensure_ascii=False), prior, contents_pages)
             partial = c.execute('SELECT status FROM papers WHERE id=?', (paper['id'],)).fetchone()[0] == 'partial_result'
             c.execute("UPDATE ai_jobs SET status=?,stage=?,error='',run_id=?,finished_at=CURRENT_TIMESTAMP WHERE id=?", ('partial' if partial else 'completed', '部分保存，有内容待补充；未调用 API' if partial else '已重新校验本地结果，未调用 API', run, job_id))
         return {'ok': True, 'run_id': run, 'partial': partial, 'api_called': False}

@@ -1,4 +1,6 @@
 import csv
+import mimetypes
+mimetypes.add_type('text/javascript', '.mjs')
 import io
 import json
 import logging
@@ -11,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from .database import ROOT, DATA_ROOT, connect, migrate, labels, ontology_version
-from .schemas import ImportRequest, AnalysisInput, Decision, LabelInput, SearchInput, LabelEdit, AISettings, APIProfile
+from .schemas import ImportRequest, AnalysisInput, Decision, LabelInput, SearchInput, LabelEdit, AISettings, APIProfile, JournalInput
 from .analysis_service import latest, effective_tags, validate_analysis, packet, descendants
 from .import_service import dispatch
 from .archive_service import archived_pdf, archive_pdf
@@ -79,7 +81,13 @@ def paper_view(c, row):
     p['files'] = [r[0] for r in c.execute('SELECT path FROM files WHERE paper_id=?', (p['id'],))]
     a = latest(c, p['id'])
     p['analysis_title'] = a.get('title') if a else None
-    p['year'] = a.get('year') if a else None
+    from .bibliography import filename_metadata
+    filename = filename_metadata(p['files'])
+    p['year'] = filename['year'] or (a.get('year') if a else None)
+    journal = c.execute('SELECT value FROM settings WHERE key=?', (f"paper_journal_{p['id']}",)).fetchone()
+    p['journal'] = journal[0] if journal else (a or {}).get('journal', '') or filename['venue']
+    p['publication_short'] = journal[0] if journal else filename['venue'] or (a or {}).get('journal_abbreviation', '') or p['journal']
+    p['publication_short'] = p['publication_short'].upper()
     p['archived'] = archived_pdf(p['file_hash']).is_file()
     return p
 
@@ -90,7 +98,7 @@ def settings():
         folders = [r[0] for r in c.execute('SELECT path FROM folders ORDER BY path')]
         pending = c.execute("SELECT COUNT(*) FROM papers WHERE status IN ('awaiting_chat','needs_ocr')").fetchone()[0]
         folder = configured_folder(c)
-    return {'default_folder': folder, 'folders': folders, 'pending': pending, 'data_directory': str(DATA_ROOT), 'mode': 'domestic_api', 'api_calls': True, 'schema_version': 2, 'version': '0.7.0'}
+    return {'default_folder': folder, 'folders': folders, 'pending': pending, 'data_directory': str(DATA_ROOT), 'mode': 'domestic_api', 'api_calls': True, 'schema_version': 2, 'version': '0.7.10'}
 
 
 @app.get('/api/ai/status')
@@ -98,7 +106,7 @@ def ai_status():
     auth = api_service.ready()
     with connect() as c:
         config = auto_ai.configuration(c)
-    return {'auth': auth, 'config': config, 'version': '0.7.0'}
+    return {'auth': auth, 'config': config, 'version': '0.7.10'}
 
 
 @app.get('/api/ai/providers')
@@ -482,6 +490,30 @@ def pdf(paper_id: int):
             if path.is_file() and file_hash(path) == paper['file_hash']:
                 return FileResponse(path, media_type='application/pdf', content_disposition_type='inline')
     raise HTTPException(404, 'PDF 已移动或不可访问；请重新扫描新目录')
+
+
+@app.get('/api/papers/{paper_id}/page/{page}')
+def pdf_page(paper_id: int, page: int):
+    import pymupdf
+    source = pdf(paper_id)
+    try:
+        with pymupdf.open(source.path) as doc:
+            if not 1 <= page <= len(doc):
+                raise HTTPException(400, 'PDF 页码超出范围')
+            image = doc[page - 1].get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6), alpha=False).tobytes('png')
+        return Response(image, media_type='image/png', headers={'Cache-Control': 'private, max-age=3600'})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, '该 PDF 无法渲染，请尝试打开原始文件')
+
+
+@app.post('/api/papers/{paper_id}/journal')
+def save_journal(paper_id: int, body: JournalInput):
+    with connect() as c:
+        get_paper(c, paper_id)
+        c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (f'paper_journal_{paper_id}', body.journal.strip()))
+    return {'ok': True}
 
 
 @app.get('/api/papers/{paper_id}/bundle')

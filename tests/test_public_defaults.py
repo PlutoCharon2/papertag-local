@@ -8,7 +8,7 @@ def test_clean_profile_has_no_predefined_document_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(database, 'DB_PATH', tmp_path / 'library.db')
     with TestClient(app) as client:
         settings = client.get('/api/settings').json()
-        assert settings['version'] == '0.7.0'
+        assert settings['version'] == '0.7.10'
         assert settings['default_folder'] == ''
         assert not settings['folders']
         assert client.post('/api/update', json={}).status_code == 400

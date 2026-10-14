@@ -6,10 +6,10 @@ Uninstallable=no
 AppId={{4F6AB230-8EBE-4D52-A6B2-EF6F61C21B24}
 #endif
 AppName=PaperTag Local
-AppVersion=0.7.0
+AppVersion=0.7.10
 AppPublisher=PaperTag Local contributors
 DefaultDirName={localappdata}\Programs\ResearchLiteratureLibrary
-DefaultGroupName=研读科研文献库
+DefaultGroupName=垃圾桶科研文献库
 DisableDirPage=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -21,7 +21,7 @@ OutputDir=tmp
 OutputBaseFilename=validation-setup
 #else
 OutputDir=release
-OutputBaseFilename=PaperTagLocal-Setup-0.7.0
+OutputBaseFilename=PaperTagLocal-Setup-0.7.10
 #endif
 Compression=lzma2
 SolidCompression=yes
@@ -37,12 +37,12 @@ Source: "dist\LiteratureLibrary\*"; DestDir: "{app}"; Flags: ignoreversion recur
 
 [Icons]
 #ifndef ValidationBuild
-Name: "{group}\研读科研文献库"; Filename: "{app}\LiteratureLibrary.exe"
-Name: "{autodesktop}\研读科研文献库"; Filename: "{app}\LiteratureLibrary.exe"; Tasks: desktopicon
+Name: "{group}\垃圾桶科研文献库"; Filename: "{app}\LiteratureLibrary.exe"
+Name: "{autodesktop}\垃圾桶科研文献库"; Filename: "{app}\LiteratureLibrary.exe"; Tasks: desktopicon
 #endif
 
 [Run]
-Filename: "{app}\LiteratureLibrary.exe"; Description: "启动研读科研文献库"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\LiteratureLibrary.exe"; Description: "启动垃圾桶科研文献库"; Flags: nowait postinstall skipifsilent
 
 ; The user's database is under LOCALAPPDATA, outside {app}.
 ; Uninstall deliberately preserves it, and preserves every original PDF.

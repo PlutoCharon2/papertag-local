@@ -147,7 +147,8 @@ def build_request(provider, item, images, prompt, schema, probe=False):
             strict_schema(schema)
             definitions = schema.get('$defs', {})
             if 'Evidence' in definitions:
-                definitions['Evidence']['properties']['page'] = {'type': 'integer', 'minimum': 1, 'maximum': len(images)}
+                pages = [int(path.stem.split('-')[-1]) if re.fullmatch(r'page-\d+', path.stem) else index for index, path in enumerate(images, 1)]
+                definitions['Evidence']['properties']['page'] = {'type': 'integer', 'minimum': 1, 'maximum': len(images)} if pages == list(range(1, len(images) + 1)) else {'type': 'integer', 'enum': pages}
                 definitions['Evidence']['properties']['block_id'] = {'type': 'string', 'const': ''}
                 with connect() as c:
                     ids = [row[0] for row in c.execute("SELECT id FROM labels WHERE active=1 AND dimension!='personal'")]

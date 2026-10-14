@@ -11,3 +11,5 @@ This distribution includes components under their own licenses. Copies found in 
 - Additional transitive dependencies retain the notices included with their package distributions.
 
 Application source and build instructions accompany each public installer release. API model weights and service subscriptions are not distributed by this project.
+
+- Mozilla PDF.js 6.4.299 (legacy generic distribution): Apache-2.0; official bundle from https://github.com/mozilla/pdf.js/releases/tag/v6.4.299. Full license retained in frontend/pdfjs/LICENSE and licenses/PDFjs-APACHE-2.0.txt.

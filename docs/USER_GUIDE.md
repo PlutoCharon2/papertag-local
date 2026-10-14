@@ -1,4 +1,4 @@
-# PaperTag Local · 研读
+# PaperTag Local · 垃圾桶
 
 Windows 11 本地 AI 文献标签库。导入 PDF 或文件夹，使用你配置的视觉模型 API 生成标签、摘要及带页码的断言，本地保存结果并增量更新。
 
@@ -6,9 +6,19 @@ Windows 11 本地 AI 文献标签库。导入 PDF 或文件夹，使用你配置
 
 ## 安装
 
-从本仓库 Releases 下载 `PaperTagLocal-Setup-0.7.0.exe`，选择安装目录。Windows 11 x64，需 Microsoft Edge WebView2。安装包未签名，系统可能要求你确认来源。
+从本仓库 Releases 下载 `PaperTagLocal-Setup-0.7.10.exe`，选择安装目录。Windows 11 x64，需 Microsoft Edge WebView2。安装包未签名，系统可能要求你确认来源。
 
 安装包不包含 API 密钥、账号会话、论文、个人目录、数据库、历史分析或日志。第一次使用没有预设文献目录；请自行选择 PDF / 文件夹和配置 API。升级会复用本机已有数据库，这是本地数据复用，不是安装包携带了私人配置。
+
+## 本版更新
+
+- 内嵌 PDF.js 原始 PDF 阅读器：连续滚动、文本选择、搜索和专注阅读。
+- 浅色青蓝界面，标签管理支持搜索、重命名、删除和恢复；删除标签保留论文和其他归属。
+- 文献卡片显示年份及期刊 / 会议简称；后续 AI 分析一并提取基础书目信息。
+- 超过 30 页的文献仅分析目录；找不到完整目录时停止，不生成正文结论。
+- 启动后显示托盘图标，点关闭按钮隐藏窗口，后台任务继续；双击托盘或再次启动可恢复窗口。
+
+**升级前请完全退出旧程序。** 已支持托盘的版本需右键托盘图标选择“退出软件”，然后安装到原目录。已有文献、分析、人工决定和 API 配置继续复用。Windows 可能将托盘图标放入右下角隐藏图标区。隐藏窗口仍占用内存。
 
 ## 使用
 
@@ -24,7 +34,7 @@ Windows 11 本地 AI 文献标签库。导入 PDF 或文件夹，使用你配置
 
 - 数据库和 PDF 归档保存在本机用户目录中，与安装目录分开；卸载不主动删除文献数据。
 - API 密钥由当前 Windows 用户的 DPAPI 加密，不回显；更换用户或电脑后重新配置。
-- 执行分析时，完整 PDF 页面图像和所需提示词会发送给你选择的服务商。这不是离线 AI 模型。
+- 执行分析时，所选 PDF 页面图像和所需提示词会发送给你选择的服务商。这不是离线 AI 模型。
 - 密钥仅发送到选定服务商的官方 HTTPS 接口，拒绝跨域重定向。没有遥测上传、自动 GitHub 上传或云端同步功能。
 - 任务回执、AI 原始返回和日志留在本地。分享导出的文件或报错前请自行检查其中的文献内容及路径。
 
@@ -50,3 +60,5 @@ AGPL-3.0-only，见 [LICENSE](LICENSE)。PDF 组件 PyMuPDF / MuPDF 使用 AGPL 
 ## English
 
 A local-first Windows PDF research library with remote vision API tagging, persistent results, dynamic facets, manual decisions and content-hash incremental updates. Bring your own API key. PDF page images are sent to the selected provider; the app is not an offline AI model. Experimental prerelease: review research claims against the original paper.
+
+超过30页的文献仅做目录级分析：先用前30页的缩略图让AI定位目录，再上传目录页生成覆盖主题标签。未找到完整目录时停止；不生成正文结论。目录定位和目录分析可能各产生一次API调用，已保存结果继续复用。

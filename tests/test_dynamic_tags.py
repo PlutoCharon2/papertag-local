@@ -59,3 +59,15 @@ def test_suggestions_from_latest_local_analysis(library):
     with connect() as c:
         c.execute('INSERT INTO runs(paper_id,payload) VALUES(?,?)', (pid, json.dumps({'title': 'Paper', 'tags': [], 'suggestions': ['Computer Vision']})))
     assert client.get('/api/ontology').json()['suggestions'][0]['text'] == 'Computer Vision'
+
+
+def test_deleting_one_tag_preserves_paper_and_other_memberships(library):
+    client,pid=library
+    for label in ['game_theory','control']:
+        assert client.post(f'/api/papers/{pid}/decision',json={'label_id':label,'decision':'manual'}).status_code==200
+    assert client.delete('/api/ontology/game_theory').status_code==200
+    detail=client.get(f'/api/papers/{pid}').json()
+    assert any(tag['label_id']=='control' for tag in detail['tags'])
+    papers=client.post('/api/search',json={'filters':{'topic':['control']}}).json()
+    assert pid in [p['id'] for p in papers]
+    assert client.get(f'/api/papers/{pid}/pdf').status_code==200
