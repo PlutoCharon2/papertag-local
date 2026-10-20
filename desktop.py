@@ -62,6 +62,17 @@ class DesktopAPI:
         Path(result[0]).write_bytes(response.body)
         return result[0]
 
+    def open_original_location(self, paper_id):
+        import subprocess
+        from backend.database import connect
+        with connect() as c:
+            paths = [Path(r[0]) for r in c.execute('SELECT path FROM files WHERE paper_id=?', (int(paper_id),))]
+        for path in paths:
+            if path.is_file() and path.suffix.lower() == '.pdf':
+                subprocess.Popen(['explorer.exe', '/select,', str(path.resolve())])
+                return True
+        raise ValueError('原始PDF已移动或不可访问，请检查本地目录')
+
     def save_text(self, name, text):
         import webview
         name = Path(name).name
@@ -142,16 +153,90 @@ def run_app():
                     time.sleep(.1)
                 if not result or not result['bridge'] or not result['facetsReady']:
                     raise RuntimeError('桌面桥接或标签界面未就绪')
+                if os.environ.get('LITERATURE_GUI_CHECK_REFRESH') == '1':
+                    api._window.evaluate_js("showPage('settings');true")
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        refresh_ui = api._window.evaluate_js("({nav:document.querySelector('nav [data-page=\"settings\"]').textContent,minutes:document.querySelector('#refreshMinutes')?.value,enabled:document.querySelector('#refreshEnabled')?.checked,button:document.querySelector('#updateLibrary').textContent})")
+                        if refresh_ui.get('minutes') == '20' and refresh_ui.get('enabled'):
+                            break
+                        time.sleep(.1)
+                    if refresh_ui.get('nav') != '设置' or refresh_ui.get('minutes') != '20' or refresh_ui.get('button') != '检查新增':
+                        raise RuntimeError('刷新设置界面未就绪')
+                    api._window.evaluate_js("document.querySelector('#refreshMinutes').value='45';document.querySelector('#refreshSettingsForm').requestSubmit();true")
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        with urllib.request.urlopen(url + '/api/refresh/settings', timeout=5) as response:
+                            saved = json.load(response)
+                        if saved['interval_minutes'] == 45:
+                            break
+                        time.sleep(.1)
+                    if saved['interval_minutes'] != 45:
+                        raise RuntimeError('刷新间隔未保存')
+                    api._window.evaluate_js("showPage('library');document.querySelector('#updateLibrary').click();true")
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        scan_ui = api._window.evaluate_js("({status:document.querySelector('#libraryRefreshStatus').textContent,years:document.querySelectorAll('.publication-year').length,venues:document.querySelectorAll('.publication-venue').length,count:document.querySelector('#count').textContent})")
+                        if scan_ui.get('count') == '1' and '上次检查' in scan_ui.get('status', ''):
+                            break
+                        time.sleep(.2)
+                    if scan_ui.get('count') != '1' or scan_ui.get('years') != 1 or scan_ui.get('venues') != 1:
+                        raise RuntimeError('手动刷新或发表信息标签未生效')
+                    combined_ui = api._window.evaluate_js("({combined:!!document.querySelector('#checkNewAI'),oldPending:!!document.querySelector('#queuePending'),oldRefresh:!!document.querySelector('#refreshAI'),title:document.querySelector('.paper-card h3').textContent})")
+                    if not combined_ui['combined'] or combined_ui['oldPending'] or combined_ui['oldRefresh'] or combined_ui['title'].startswith('[2026]'):
+                        raise RuntimeError('合并入口、删除状态刷新按钮或标题显示未生效')
+                    result['library_refresh'] = {'defaults': refresh_ui, 'saved': saved, 'manual_scan': scan_ui}
+                    result['library_refresh']['combined_ui'] = combined_ui
+                    with urllib.request.urlopen(url + '/api/ai/queue', timeout=5) as response:
+                        queue = json.load(response)
+                    if queue.get('queued') != 1:
+                        raise RuntimeError('检查新增没有将新论文加入分析队列')
+                    toggle_states = []
+                    for expected in ['继续分析', '全部暂停']:
+                        api._window.evaluate_js("document.querySelector('#pauseAllAI').click();true")
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline:
+                            toggle = api._window.evaluate_js("({text:document.querySelector('#pauseAllAI').textContent,disabled:document.querySelector('#pauseAllAI').disabled,single:!document.querySelector('#resumeAllAI')})")
+                            if toggle['text'] == expected and not toggle['disabled']:
+                                break
+                            time.sleep(.1)
+                        if toggle['text'] != expected or not toggle['single'] or toggle['disabled']:
+                            raise RuntimeError('合并后的暂停/继续按钮未正确切换')
+                        toggle_states.append(toggle)
+                    result['library_refresh']['queue'] = queue
+                    result['library_refresh']['toggle_states'] = toggle_states
+                    if os.environ.get('LITERATURE_GUI_TEST_SOURCE'):
+                        from backend.database import DATA_ROOT as refresh_test_root
+                        source = Path(os.environ['LITERATURE_GUI_TEST_SOURCE']).resolve()
+                        if not source.is_relative_to(refresh_test_root.parent.resolve()):
+                            raise RuntimeError('GUI测试源文件不在隔离测试目录')
+                        source.unlink()
+                        api._window.evaluate_js("showPage('import');document.querySelector('#checkNewAI').click();true")
+                        deadline = time.monotonic() + 15
+                        while time.monotonic() < deadline:
+                            deleted_ui = api._window.evaluate_js("({count:document.querySelector('#count').textContent,status:document.querySelector('#libraryRefreshStatus').textContent})")
+                            if deleted_ui['count'] == '0' and '已移除 1' in deleted_ui['status']:
+                                break
+                            time.sleep(.2)
+                        if deleted_ui['count'] != '0' or '已移除 1' not in deleted_ui['status']:
+                            raise RuntimeError('合并入口检查后没有移除本地已删除文献')
+                        result['library_refresh']['deleted_ui'] = deleted_ui
                 api._window.evaluate_js('openAPIConfiguration(); true')
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    api_ui = api._window.evaluate_js("({button:document.querySelector('#chatLogin').textContent,open:document.querySelector('#apiConfigDialog').open,providers:document.querySelectorAll('#apiProvider option').length,model:document.querySelector('#apiProfileModel').value,secretEmpty:document.querySelector('#apiSecret').value==='',pauseAll:document.querySelector('#pauseAllAI')?.textContent,resumeAll:document.querySelector('#resumeAllAI')?.textContent} )")
+                    api_ui = api._window.evaluate_js("({button:document.querySelector('#chatLogin').textContent,open:document.querySelector('#apiConfigDialog').open,providers:document.querySelectorAll('#apiProvider option').length,model:document.querySelector('#apiProfileModel').value,secretEmpty:document.querySelector('#apiSecret').value==='',pauseAll:document.querySelector('#pauseAllAI')?.textContent,resumeAllAbsent:!document.querySelector('#resumeAllAI')} )")
                     if api_ui['open'] and api_ui['providers'] == 4:
                         break
                     time.sleep(.1)
                 if not api_ui['open'] or api_ui['providers'] != 4 or api_ui['button'] != 'API 配置' or api_ui['pauseAll'] != '全部暂停':
                     raise RuntimeError('API 配置界面未就绪')
                 result['api_ui'] = api_ui
+                if os.environ.get('LITERATURE_GUI_CHECK_INTERACTIONS') == '1':
+                    from desktop_validation import check_interactions
+                    result['interactions'] = check_interactions(api._window)
+                if os.environ.get('LITERATURE_GUI_CHECK_KEYS') == '1':
+                    from desktop_validation import check_keys_and_review
+                    result['keys_and_review'] = check_keys_and_review(api._window,url)
                 api._window.evaluate_js("document.querySelector('#apiConfigDialog').close();showPage('import');true")
                 result['recheck_ui'] = api._window.evaluate_js("({button:document.querySelector('#recheckAllAI').textContent,visible:document.querySelector('#recheckAllAI').getBoundingClientRect().width>0,filters:document.querySelectorAll('#aiJobView option').length})")
                 if not result['recheck_ui']['visible'] or result['recheck_ui']['filters'] != 4:
@@ -171,7 +256,7 @@ def run_app():
                     api._window.evaluate_js("showPage('library');loadDetail(state.papers[0].id);true")
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
-                        reader = api._window.evaluate_js("({loaded:!!document.querySelector('#pdfViewerFrame')?.contentWindow?.PDFViewerApplication?.pdfDocument&&document.querySelector('#pdfViewerFrame').contentDocument.querySelectorAll('.textLayer span').length>0,tagsClosed:document.querySelector('#tagReviewDialog')?.open===false,claimsClosed:document.querySelector('#claimsDialog')?.open===false,journal:document.querySelector('#detail')?.textContent.toUpperCase().includes('READER TEST JOURNAL')})")
+                        reader = api._window.evaluate_js("({loaded:!!document.querySelector('#pdfViewerFrame')?.contentWindow?.PDFViewerApplication?.pdfDocument&&document.querySelector('#pdfViewerFrame').contentDocument.querySelectorAll('.textLayer span').length>0,tagsClosed:document.querySelector('#tagReviewDialog')?.open===false,claimsClosed:!document.querySelector('#claimsDialog'),journal:document.querySelector('#detail')?.textContent.toUpperCase().includes('READER TEST JOURNAL')})")
                         if all(reader.values()):
                             break
                         time.sleep(.1)
@@ -180,10 +265,10 @@ def run_app():
                     api._window.evaluate_js("document.querySelector('#openTagReview').click();true")
                     if not api._window.evaluate_js("document.querySelector('#tagReviewDialog').open&&document.querySelector('#tagReviewDialog').getBoundingClientRect().width>0"):
                         raise RuntimeError('标签审核按钮无效')
-                    api._window.evaluate_js("document.querySelector('#tagReviewDialog').close();document.querySelector('#openClaims').click();true")
-                    if not api._window.evaluate_js("document.querySelector('#claimsDialog').open&&document.querySelector('#claimsDialog').getBoundingClientRect().width>0"):
+                    api._window.evaluate_js("true")
+                    if not api._window.evaluate_js("!!document.querySelector('#tagReviewDialog #reviewClaims')&&!document.querySelector('#openClaims')"):
                         raise RuntimeError('证据按钮无效')
-                    api._window.evaluate_js("document.querySelector('#claimsDialog').close();state.showPDF(2);true")
+                    api._window.evaluate_js("document.querySelector('#tagReviewDialog').close();state.showPDF(2);true")
                     deadline = time.monotonic() + 10
                     while time.monotonic() < deadline:
                         flipped = api._window.evaluate_js("document.querySelector('#pdfViewerFrame').contentWindow.PDFViewerApplication.page===2&&document.querySelector('#pdfViewerFrame').contentDocument.querySelector('[data-page-number=\"2\"] canvas')?.width>0")
@@ -214,6 +299,28 @@ def run_app():
                     if enlarged <= original_width:
                         raise RuntimeError('放大没有重新渲染PDF')
                     result['original_pdf_reader'] = {'pdf_header': '%PDF-', 'selectable_text_layer': True, 'pages': 2, 'before_zoom_canvas_width': original_width, 'after_zoom_canvas_width': enlarged}
+                    api._window.evaluate_js("window.favoriteReaderFrame=document.querySelector('#pdfViewerFrame');favoriteReaderFrame.contentWindow.PDFViewerApplication.page=2;document.querySelector('.favorite-toggle').click();true")
+                    deadline = time.monotonic()+10
+                    while time.monotonic()<deadline:
+                        if api._window.evaluate_js("document.querySelector('.favorite-toggle').getAttribute('aria-pressed')==='true'&&!document.querySelector('.favorite-toggle').disabled"):
+                            break
+                        time.sleep(.1)
+                    if not api._window.evaluate_js("state.detail.is_favorite&&document.querySelector('.favorite-toggle').nextElementSibling.classList.contains('focus-reading-toggle')&&favoriteReaderFrame===document.querySelector('#pdfViewerFrame')&&favoriteReaderFrame.contentWindow.PDFViewerApplication.page===2"):
+                        raise RuntimeError('收藏未保存、星标位置错误或PDF阅读位置被重置')
+                    api._window.evaluate_js("document.querySelector('#favoritesOnly').click();true")
+                    time.sleep(.3)
+                    if not api._window.evaluate_js("document.querySelector('#favoritesOnly').closest('label').nextElementSibling.id==='filters'&&state.papers.length===1&&state.papers[0].is_favorite"):
+                        raise RuntimeError('收藏筛选不可用或位置不正确')
+                    api._window.evaluate_js("document.querySelector('.favorite-toggle').click();true")
+                    deadline = time.monotonic()+10
+                    while time.monotonic()<deadline:
+                        if api._window.evaluate_js("state.papers.length===0&&!document.querySelector('.favorite-toggle').disabled"):
+                            break
+                        time.sleep(.1)
+                    if not api._window.evaluate_js("state.papers.length===0&&!state.detail.is_favorite&&favoriteReaderFrame===document.querySelector('#pdfViewerFrame')"):
+                        raise RuntimeError('取消收藏没有更新筛选或重新加载了PDF')
+                    api._window.evaluate_js("document.querySelector('#favoritesOnly').click();true")
+                    result['favorites']={'star_before_focus':True,'filter_above_topics':True,'toggle_and_filter':True,'pdf_position_preserved':True}
                     normal = api._window.evaluate_js("(()=>{const frame=document.querySelector('#pdfViewerFrame').getBoundingClientRect();return {width:frame.width,height:frame.height,viewportWidth:innerWidth,viewportHeight:innerHeight,statusHidden:getComputedStyle(document.querySelector('#gptAuthState')).display==='none',offlineHidden:getComputedStyle(document.querySelector('.offline')).display==='none',filtersHidden:document.querySelector('#pendingOnly').closest('label').getBoundingClientRect().width===0&&document.querySelector('#showVersions').closest('label').getBoundingClientRect().width===0,exportsMoved:!!document.querySelector('#exportJSON').closest('#import')&&!!document.querySelector('#exportCSV').closest('#import'),navigation:document.querySelector('nav [data-page=import]').textContent};})()")
                     if not all(normal[k] for k in ('statusHidden','offlineHidden','filtersHidden','exportsMoved')) or normal['navigation']!='导入与导出' or normal['height']<normal['viewportHeight']*.7:
                         raise RuntimeError('紧凑阅读布局不符合要求：'+str(normal))
@@ -289,6 +396,19 @@ def run_app():
                         background_alive = response.status == 200
                     if not hidden or not tray.icon.Visible or not background_alive:
                         raise RuntimeError('关闭后没有保持托盘和后台服务')
+                    from System import Array, Object
+                    from System.Reflection import BindingFlags
+                    from System.Windows.Forms import MouseButtons, MouseEventArgs
+                    def click_tray(button):
+                        method = tray.icon.GetType().GetMethod('OnMouseClick', BindingFlags.Instance | BindingFlags.NonPublic)
+                        method.Invoke(tray.icon, Array[Object]([MouseEventArgs(button, 1, 0, 0, 0)]))
+                    tray.invoke(lambda: click_tray(MouseButtons.Right))
+                    if api._window.native.Visible:
+                        raise RuntimeError('右键托盘不应恢复窗口')
+                    tray.invoke(lambda: click_tray(MouseButtons.Left))
+                    if not api._window.native.Visible:
+                        raise RuntimeError('单击托盘未恢复窗口')
+                    tray.invoke(lambda: api._window.native.Close())
                     from backend.database import DATA_ROOT
                     from desktop_tray import restore_existing_window
                     if not restore_existing_window(DATA_ROOT):
@@ -302,7 +422,7 @@ def run_app():
                     tray.invoke(lambda: tray.open_item.PerformClick())
                     if not api._window.native.Visible:
                         raise RuntimeError('托盘菜单未恢复窗口')
-                    result['tray']={'registered':True,'close_hides_window':hidden,'background_alive':background_alive,'relaunch_restores':True,'menu_restores':True,'exit_menu':True}
+                    result['tray']={'registered':True,'close_hides_window':hidden,'background_alive':background_alive,'single_left_click_restores':True,'right_click_keeps_hidden':True,'relaunch_restores':True,'menu_restores':True,'exit_menu':True}
                 target = Path(os.environ.get('LITERATURE_SMOKE_REPORT', 'desktop-smoke.json'))
                 target.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
             except Exception as exc:

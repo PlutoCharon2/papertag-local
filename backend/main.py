@@ -13,12 +13,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from .database import ROOT, DATA_ROOT, connect, migrate, labels, ontology_version
-from .schemas import ImportRequest, AnalysisInput, Decision, LabelInput, SearchInput, LabelEdit, AISettings, APIProfile, JournalInput
+from .schemas import ImportRequest, AnalysisInput, Decision, LabelInput, SearchInput, LabelEdit, AISettings, APIProfile, JournalInput, FavoriteInput
 from .analysis_service import latest, effective_tags, validate_analysis, packet, descendants
 from .import_service import dispatch
 from .archive_service import archived_pdf, archive_pdf
-from .pdf_service import file_hash
+from .pdf_service import file_hash, PDF_LOCK
 from . import auto_analysis_service as auto_ai, codex_service, api_service
+from . import refresh_service
+from .schemas import RefreshSettings
+from .schemas import KeyViewRequest
 
 DEFAULT_FOLDER = ''
 
@@ -39,7 +42,9 @@ async def lifespan(app):
     with connect() as c:
         c.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('running','waiting')")
     auto_ai.start_worker()
+    refresh_service.start_worker()
     yield
+    refresh_service.stop_worker()
     auto_ai.stop_worker()
 
 
@@ -77,17 +82,17 @@ def get_paper(c, paper_id):
 
 def paper_view(c, row):
     p = dict(row)
+    p['is_favorite'] = bool(p.get('is_favorite', 0))
     p['tags'] = effective_tags(c, p['id'])
     p['files'] = [r[0] for r in c.execute('SELECT path FROM files WHERE paper_id=?', (p['id'],))]
     a = latest(c, p['id'])
     p['analysis_title'] = a.get('title') if a else None
-    from .bibliography import filename_metadata
+    from .bibliography import filename_metadata, display_title
+    p['display_title'] = display_title(p['analysis_title'] or p['title'], p['files'])
     filename = filename_metadata(p['files'])
     p['year'] = filename['year'] or (a.get('year') if a else None)
-    journal = c.execute('SELECT value FROM settings WHERE key=?', (f"paper_journal_{p['id']}",)).fetchone()
-    p['journal'] = journal[0] if journal else (a or {}).get('journal', '') or filename['venue']
-    p['publication_short'] = journal[0] if journal else filename['venue'] or (a or {}).get('journal_abbreviation', '') or p['journal']
-    p['publication_short'] = p['publication_short'].upper()
+    from .publication import view as publication_view
+    p.update(publication_view(c, p['id'], a))
     p['archived'] = archived_pdf(p['file_hash']).is_file()
     return p
 
@@ -98,7 +103,7 @@ def settings():
         folders = [r[0] for r in c.execute('SELECT path FROM folders ORDER BY path')]
         pending = c.execute("SELECT COUNT(*) FROM papers WHERE status IN ('awaiting_chat','needs_ocr')").fetchone()[0]
         folder = configured_folder(c)
-    return {'default_folder': folder, 'folders': folders, 'pending': pending, 'data_directory': str(DATA_ROOT), 'mode': 'domestic_api', 'api_calls': True, 'schema_version': 2, 'version': '0.7.10'}
+    return {'default_folder': folder, 'folders': folders, 'pending': pending, 'data_directory': str(DATA_ROOT), 'mode': 'domestic_api', 'api_calls': True, 'schema_version': 2, 'version': '0.7.22'}
 
 
 @app.get('/api/ai/status')
@@ -106,7 +111,7 @@ def ai_status():
     auth = api_service.ready()
     with connect() as c:
         config = auto_ai.configuration(c)
-    return {'auth': auth, 'config': config, 'version': '0.7.10'}
+    return {'auth': auth, 'config': config, 'version': '0.7.22'}
 
 
 @app.get('/api/ai/providers')
@@ -117,7 +122,7 @@ def api_providers():
 @app.post('/api/ai/provider')
 def api_provider(body: APIProfile):
     try:
-        return api_service.save(body.provider, body.url, body.model, body.api_key, body.clear_key)
+        return api_service.save(body.provider, body.url, body.model, body.api_key, body.clear_key, body.keys)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
@@ -128,6 +133,17 @@ def api_test():
         return api_service.test_connection()
     except (ValueError, KeyError) as exc:
         raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else 'API 响应格式错误')
+
+
+@app.post('/api/ai/provider/keys')
+def view_provider_keys(body: KeyViewRequest, request: Request):
+    from fastapi.responses import JSONResponse
+    if request.headers.get('x-papertag-key-view') != '1':
+        raise HTTPException(403,'请从本地API配置页面查看密钥')
+    try:
+        return JSONResponse({'keys':api_service.reveal_keys(body.provider)},headers={'Cache-Control':'no-store','Pragma':'no-cache'})
+    except ValueError as exc:
+        raise HTTPException(400,str(exc))
 
 
 @app.post('/api/ai/login')
@@ -153,10 +169,15 @@ def ai_jobs(view: str = 'all'):
     filters = {'all': '', 'failed': "WHERE j.status IN ('failed','partial')", 'active': "WHERE j.status IN ('running','queued','waiting_login')", 'completed': "WHERE j.status IN ('completed','cached')"}
     if view not in filters:
         raise HTTPException(400, '无效的任务筛选')
+    condition = filters[view] + " AND p.status!='source_missing'" if filters[view] else "WHERE p.status!='source_missing'"
     with connect() as c:
-        jobs = [dict(r) for r in c.execute(f"""SELECT j.*,p.title FROM ai_jobs j JOIN papers p ON p.id=j.paper_id {filters[view]}
+        jobs = [dict(r) for r in c.execute(f"""SELECT j.*,p.title FROM ai_jobs j JOIN papers p ON p.id=j.paper_id {condition}
             ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'waiting_login' THEN 1 WHEN 'queued' THEN 2 WHEN 'failed' THEN 3 WHEN 'partial' THEN 3 WHEN 'interrupted' THEN 4 WHEN 'paused' THEN 5 ELSE 6 END,
             CASE WHEN j.status IN ('running','waiting_login','queued') THEN j.id ELSE -j.id END LIMIT 300""")]
+        from .bibliography import display_title
+        for job in jobs:
+            paths = [r[0] for r in c.execute('SELECT path FROM files WHERE paper_id=?', (job['paper_id'],))]
+            job['title'] = display_title(job['title'], paths)
     for job in jobs:
         if job['status'] == 'queued' and job['stage'] == '等待 GPT':
             job['stage'] = '等待 AI（排队中，尚未调用 API）'
@@ -200,7 +221,7 @@ def ai_jobs(view: str = 'all'):
 @app.get('/api/ai/queue')
 def ai_queue():
     with connect() as c:
-        return {row[0]: row[1] for row in c.execute('SELECT status,COUNT(*) FROM ai_jobs GROUP BY status')}
+        return {row[0]: row[1] for row in c.execute("SELECT j.status,COUNT(*) FROM ai_jobs j JOIN papers p ON p.id=j.paper_id WHERE p.status!='source_missing' GROUP BY j.status")}
 
 
 @app.post('/api/ai/pause-all')
@@ -222,6 +243,7 @@ def ai_resume_all():
         c.execute("UPDATE settings SET value='1' WHERE key='ai_enabled'")
         c.execute("INSERT OR REPLACE INTO settings VALUES('ai_pause_reason','')")
         count = c.execute("""UPDATE ai_jobs SET status='queued',stage='等待 AI',error='' WHERE status IN ('paused','interrupted')
+            AND EXISTS(SELECT 1 FROM papers p WHERE p.id=ai_jobs.paper_id AND p.status!='source_missing')
             AND NOT EXISTS(SELECT 1 FROM ai_jobs active WHERE active.paper_id=ai_jobs.paper_id AND active.status IN ('queued','waiting_login','running'))""").rowcount
     return {'ok': True, 'resumed': count}
 
@@ -260,10 +282,7 @@ def ai_recheck_all():
 
 @app.post('/api/ai/pending')
 def analyze_pending():
-    with connect() as c:
-        ids = [r[0] for r in c.execute("SELECT id FROM papers WHERE status IN ('awaiting_chat','needs_ocr') AND NOT EXISTS(SELECT 1 FROM runs WHERE runs.paper_id=papers.id)")]
-    created = [auto_ai.enqueue(pid) for pid in ids]
-    return {'queued': sum(j is not None for j in created)}
+    return {'queued': auto_ai.enqueue_unattempted()}
 
 
 @app.post('/api/papers/{paper_id}/analyze')
@@ -301,7 +320,7 @@ def ontology():
         label_map = {r['id']: r for r in all_labels}
         usage = {r['id']: set() for r in all_labels}
         suggestions = []
-        for paper in c.execute("SELECT id,title FROM papers WHERE status!='superseded'").fetchall():
+        for paper in c.execute("SELECT id,title FROM papers WHERE status NOT IN ('superseded','source_missing')").fetchall():
             for tag in effective_tags(c, paper['id']):
                 current = tag['label_id']
                 visited = set()
@@ -368,13 +387,14 @@ def deactivate_label(label_id: str):
 
 
 @app.post('/api/import')
-def start_import(body: ImportRequest):
+def start_import(body: ImportRequest, analyze_new: bool = False, reconcile_missing: bool = False):
     paths = list(dict.fromkeys(str(Path(p).expanduser().resolve()) for p in (body.paths or [body.path]) if p.strip()))
     if not paths:
         raise HTTPException(400, '请选择 PDF 文件或文件夹')
     for value in paths:
         path = Path(value)
-        if not path.exists() or (path.is_file() and path.suffix.lower() != '.pdf'):
+        missing_pdf = reconcile_missing and path.suffix.lower() == '.pdf' and not path.exists() and path.parent.is_dir()
+        if (not path.exists() and not missing_pdf) or (path.is_file() and path.suffix.lower() != '.pdf'):
             raise HTTPException(400, '请输入现有 PDF 文件或文件夹的完整路径')
     with connect() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -384,26 +404,60 @@ def start_import(body: ImportRequest):
             if Path(value).is_dir():
                 c.execute('INSERT OR IGNORE INTO folders(path) VALUES(?)', (value,))
         job_id = c.execute("INSERT INTO jobs(path,paths,status) VALUES(?,?,'waiting')", (' | '.join(paths), json.dumps(paths, ensure_ascii=False))).lastrowid
+        if analyze_new:
+            c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (f'import_analyze_new_{job_id}', '1'))
+        if reconcile_missing:
+            c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (f'import_reconcile_missing_{job_id}', '1'))
     dispatch(job_id)
     return {'job_id': job_id}
 
 
 @app.post('/api/update')
-def update_library():
+def update_library(analyze_new: bool = False):
     with connect() as c:
         roots = [r[0] for r in c.execute('SELECT path FROM folders')]
         files = [r[0] for r in c.execute('SELECT path FROM files')]
         default_folder = configured_folder(c)
-    paths = [p for p in dict.fromkeys([default_folder] + roots + files) if p and Path(p).exists()]
+    paths = [p for p in dict.fromkeys([default_folder] + roots + files) if p and
+             (Path(p).exists() or (p in files and Path(p).parent.is_dir()))]
     if not paths:
         raise HTTPException(400, '默认目录及已导入路径不可访问，请先选择一个文件夹')
-    return start_import(ImportRequest(paths=paths))
+    result = start_import(ImportRequest(paths=paths), analyze_new=analyze_new, reconcile_missing=True)
+    refresh_service.reset_timer()
+    return result
+
+
+@app.post('/api/check-new')
+def check_new_papers():
+    result = update_library(analyze_new=True)
+    with connect() as c:
+        result['analysis_enabled'] = auto_ai.configuration(c)['enabled']
+    return result
+
+
+@app.get('/api/refresh/settings')
+def refresh_settings():
+    with connect() as c:
+        return refresh_service.configuration(c)
+
+
+@app.post('/api/refresh/settings')
+def save_refresh_settings(body: RefreshSettings):
+    with connect() as c:
+        c.execute("INSERT OR REPLACE INTO settings VALUES('refresh_enabled',?)", (str(int(body.enabled)),))
+        c.execute("INSERT OR REPLACE INTO settings VALUES('refresh_interval_minutes',?)", (str(body.interval_minutes),))
+    refresh_service.reset_timer()
+    return body.model_dump()
 
 
 @app.get('/api/jobs')
 def jobs():
     with connect() as c:
-        return [dict(r) for r in c.execute('SELECT * FROM jobs ORDER BY id DESC LIMIT 30')]
+        result = [dict(r) for r in c.execute('SELECT * FROM jobs ORDER BY id DESC LIMIT 30')]
+        for job in result:
+            removed = c.execute('SELECT value FROM settings WHERE key=?', (f'import_removed_{job["id"]}',)).fetchone()
+            job['removed'] = int(removed[0]) if removed else 0
+        return result
 
 
 @app.post('/api/jobs/{job_id}/{action}')
@@ -439,8 +493,10 @@ def search_papers(c, body):
             groups.append(expanded)
     result = []
     needle = body.text.casefold().strip()
-    query = 'SELECT * FROM papers ORDER BY id DESC' if body.show_versions else "SELECT * FROM papers WHERE status!='superseded' ORDER BY id DESC"
+    query = "SELECT * FROM papers WHERE status!='source_missing' ORDER BY id DESC" if body.show_versions else "SELECT * FROM papers WHERE status NOT IN ('superseded','source_missing') ORDER BY id DESC"
     for row in c.execute(query):
+        if body.favorites_only and not row['is_favorite']:
+            continue
         if body.pending_only and row['status'] not in ('awaiting_chat', 'needs_ocr'):
             continue
         p = paper_view(c, row)
@@ -478,6 +534,14 @@ def detail(paper_id: int):
         return p
 
 
+@app.post('/api/papers/{paper_id}/favorite')
+def set_favorite(paper_id: int, body: FavoriteInput):
+    with connect() as c:
+        get_paper(c, paper_id)
+        c.execute('UPDATE papers SET is_favorite=? WHERE id=?', (int(body.is_favorite), paper_id))
+    return {'paper_id': paper_id, 'is_favorite': body.is_favorite}
+
+
 @app.get('/api/papers/{paper_id}/pdf')
 def pdf(paper_id: int):
     with connect() as c:
@@ -497,7 +561,7 @@ def pdf_page(paper_id: int, page: int):
     import pymupdf
     source = pdf(paper_id)
     try:
-        with pymupdf.open(source.path) as doc:
+        with PDF_LOCK, pymupdf.open(source.path) as doc:
             if not 1 <= page <= len(doc):
                 raise HTTPException(400, 'PDF 页码超出范围')
             image = doc[page - 1].get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6), alpha=False).tobytes('png')
@@ -566,6 +630,8 @@ def import_analysis(paper_id: int, body: AnalysisInput):
         except (ValidationError, ValueError) as exc:
             logging.warning('Analysis rejected for paper %s: %s', paper_id, exc)
             raise HTTPException(422, str(exc))
+        from .publication import register
+        register(c, analysis)
         c.execute('INSERT INTO runs(paper_id,payload) VALUES(?,?)', (paper_id, json.dumps(analysis, ensure_ascii=False)))
         c.execute("UPDATE papers SET status='needs_review' WHERE id=?", (paper_id,))
     has_page_only = any(e['verification'] == 'page_only' for item in analysis['tags'] + analysis['claims'] for e in item['evidence'])

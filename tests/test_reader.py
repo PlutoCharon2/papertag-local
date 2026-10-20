@@ -44,7 +44,7 @@ def test_journal_from_ai_and_manual_edit_does_not_overwrite_analysis(library, mo
     assert calls == [1]
 
 
-def test_filename_year_and_venue_reused(library):
+def test_filename_year_reused_without_trusting_filename_venue(library):
     from backend.main import paper_view
     from backend.bibliography import filename_metadata
     _, pid, _ = library
@@ -55,4 +55,4 @@ def test_filename_year_and_venue_reused(library):
         paper = dict(c.execute('SELECT * FROM papers WHERE id=?', (pid,)).fetchone())
         view = paper_view(c, paper)
         assert view['year'] == 2023
-        assert view['publication_short'] == 'AUTOMATIC'
+        assert view['publication_short'] == ''

@@ -86,6 +86,9 @@ def migrate():
         if not c.execute('SELECT 1 FROM migrations WHERE version=4').fetchone():
             c.execute("INSERT OR IGNORE INTO settings VALUES('ai_provider','qwen')")
             c.execute('INSERT INTO migrations VALUES(4)')
+        if not c.execute('SELECT 1 FROM migrations WHERE version=5').fetchone():
+            c.execute('ALTER TABLE papers ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0')
+            c.execute('INSERT INTO migrations VALUES(5)')
 
 
 def labels(c):

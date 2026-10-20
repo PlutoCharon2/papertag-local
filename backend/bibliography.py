@@ -5,6 +5,17 @@ from pathlib import PureWindowsPath
 PUBLISHERS = {'ieee', 'iet', 'elsevier', 'springer', 'wiley', 'acm', '非期刊', 'unknown'}
 
 
+def display_title(title, paths):
+    """Remove filename metadata only from the displayed title, never the file."""
+    title = (title or '').strip()
+    for path in paths:
+        stem = PureWindowsPath(path).stem
+        prefix = re.match(r'^\[(?:19|20)\d{2}\](?:\[[^\[\]]+\])*\s*', stem)
+        if prefix and title.casefold().startswith(prefix[0].casefold()):
+            return title[len(prefix[0]):].strip() or title
+    return title
+
+
 def filename_metadata(paths):
     year = None
     venue = ''

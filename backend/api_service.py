@@ -7,9 +7,72 @@ import queue
 import re
 import threading
 import time
+import uuid
+import secrets
 from urllib.parse import urlsplit
 import httpx
 from .database import connect
+
+_key_lock = threading.Lock()
+_key_active = {}
+_key_failures = {}
+_key_cooldowns = {}
+_key_cursor = {}
+_bound = threading.local()
+
+
+class NoKeyAvailable(ValueError):
+    pass
+
+
+class ProviderRejected(ValueError):
+    def __init__(self,status_code,message,retry_after=60):
+        super().__init__(message)
+        self.status_code=status_code
+        self.retry_after=retry_after
+
+
+def choose_idle_key(entries):
+    return secrets.choice(entries)
+
+
+def key_entries(item):
+    if 'keys' in item:
+        return item['keys']
+    return [{'id': 'legacy', 'value': item['key'], 'enabled': True}] if item.get('key') else []
+
+
+def usable_keys(provider, item):
+    with _key_lock:
+        return [k for k in key_entries(item) if k.get('enabled', True) and (provider,k['id']) not in _key_failures
+                and _key_cooldowns.get((provider,k['id']),0)<=time.monotonic()]
+
+
+def pool_status(c):
+    provider=selected(c)
+    if provider=='codex': return {'enabled':1,'usable':1,'free':1,'busy':0,'cooling':0,'invalid':0}
+    entries=[k for k in key_entries(profile(c,provider)) if k.get('enabled',True)]
+    with _key_lock:
+        now=time.monotonic();cooling=invalid=busy=free=0
+        for key in entries:
+            identity=(provider,key['id'])
+            if identity in _key_failures: invalid+=1
+            elif _key_cooldowns.get(identity,0)>now: cooling+=1
+            elif _key_active.get(identity,0): busy+=1
+            else: free+=1
+    return {'enabled':len(entries),'usable':busy+free,'free':free,'busy':busy,'cooling':cooling,'invalid':invalid}
+
+
+def parallelism(c):
+    provider = selected(c)
+    return 1 if provider == 'codex' else len(usable_keys(provider,profile(c,provider)))
+
+
+def reveal_keys(provider):
+    with connect() as c:
+        item = profile(c, provider)
+    return [{'id': k['id'], 'value': crypt(base64.b64decode(k['value']), decrypt=True).decode(),
+             'enabled': k.get('enabled', True)} for k in key_entries(item)]
 
 PROVIDERS = {
     'qwen': {'name': '千问 · 阿里云百炼', 'url': 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'model': 'qwen3.7-flash', 'models': ['qwen3.7-flash', 'qwen3.7-plus'], 'help': '北京地域密钥；可填写业务空间专属 Base URL。'},
@@ -74,11 +137,17 @@ def public_configuration():
         profiles = {}
         for key, info in PROVIDERS.items():
             item = profile(c, key)
-            profiles[key] = {**info, 'url': item['url'], 'model': item['model'], 'has_key': bool(item['key'])}
+            entries = key_entries(item)
+            profiles[key] = {**info, 'url': item['url'], 'model': item['model'], 'has_key': bool(usable_keys(key,item)),
+                'key_count': len(entries), 'keys': [{'id': k['id'], 'enabled': k.get('enabled',True),
+                    'error': _key_failures.get((key,k['id']), '')} for k in entries]}
     return {'provider': provider, 'profiles': profiles}
 
 
-def save(provider, url, model, api_key='', clear_key=False):
+def save(provider, url, model, api_key='', clear_key=False, keys=None):
+    from .auto_analysis_service import _execution_lock
+    if _execution_lock.locked():
+        raise ValueError('请先全部暂停并等待请求停止，再修改API配置')
     url = url.strip().rstrip('/')
     validate(provider, url, model)
     with connect() as c:
@@ -86,23 +155,95 @@ def save(provider, url, model, api_key='', clear_key=False):
         if c.execute("SELECT 1 FROM ai_jobs WHERE status='running'").fetchone():
             raise ValueError('请先暂停正在分析的任务，待其停止后再切换 API')
         item = profile(c, provider)
-        encrypted = '' if clear_key else item['key']
+        entries = [] if clear_key else key_entries(item)
+        if keys is not None and not clear_key:
+            prior = {k['id']: k for k in entries}
+            entries = []
+            seen = set()
+            secrets = set()
+            for value in keys:
+                row = value.model_dump() if hasattr(value, 'model_dump') else dict(value)
+                key_id = row.get('id') or uuid.uuid4().hex
+                if key_id in seen:
+                    raise ValueError('密钥行标识重复')
+                seen.add(key_id)
+                secret = row.get('value','').strip()
+                encrypted = base64.b64encode(crypt(secret.encode())).decode('ascii') if secret else prior.get(key_id,{}).get('value','')
+                if not encrypted:
+                    raise ValueError('新增密钥不能为空；不需要的空行请移除')
+                plain = secret or crypt(base64.b64decode(encrypted),decrypt=True).decode()
+                if plain in secrets:
+                    raise ValueError('不能重复填写同一把API密钥')
+                secrets.add(plain)
+                entries.append({'id':key_id,'value':encrypted,'enabled':row.get('enabled',True)})
         if api_key.strip():
             encrypted = base64.b64encode(crypt(api_key.strip().encode())).decode('ascii')
-        item = {'url': url, 'model': model, 'key': encrypted}
+            entries = [{'id':'legacy','value':encrypted,'enabled':True}]
+        encrypted = entries[0]['value'] if entries else ''
+        item = {'url': url, 'model': model, 'key': encrypted, 'keys': entries}
         c.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('api_profile_' + provider, json.dumps(item)))
         c.execute("INSERT OR REPLACE INTO settings VALUES('ai_provider',?)", (provider,))
-    return {'ok': True, 'provider': provider, 'has_key': bool(encrypted)}
+    with _key_lock:
+        for identifier in list(_key_failures):
+            if identifier[0] == provider:
+                _key_failures.pop(identifier)
+        for identifier in list(_key_cooldowns):
+            if identifier[0]==provider: _key_cooldowns.pop(identifier)
+    return {'ok': True, 'provider': provider, 'has_key': any(k.get('enabled',True) for k in entries)}
 
 
 def credentials():
+    if getattr(_bound,'credentials',None):
+        return _bound.credentials
     with connect() as c:
         provider = selected(c)
         item = profile(c, provider)
     validate(provider, item['url'], item['model'])
-    if not item['key']:
+    entries = usable_keys(provider,item)
+    if not entries:
         raise ValueError('请在 API 配置中保存所选服务商的密钥')
-    return provider, item, crypt(base64.b64decode(item['key']), decrypt=True).decode()
+    return provider, item, crypt(base64.b64decode(entries[0]['value']), decrypt=True).decode()
+
+
+def bind_for_job():
+    with connect() as c:
+        provider = selected(c)
+        item = profile(c,provider)
+    validate(provider,item['url'],item['model'])
+    entries = usable_keys(provider,item)
+    if not entries:
+        raise NoKeyAvailable('没有空闲可用密钥，任务继续排队')
+    with _key_lock:
+        idle=[k for k in entries if not _key_active.get((provider,k['id']),0)
+              and (provider,k['id']) not in _key_failures and _key_cooldowns.get((provider,k['id']),0)<=time.monotonic()]
+        if not idle: raise NoKeyAvailable('所有可用密钥正在处理其他论文，等待空闲位置')
+        chosen = choose_idle_key(idle)
+        identity=(provider,chosen['id'])
+        _key_active[identity]=_key_active.get(identity,0)+1
+    _bound.identity=identity
+    try:
+        _bound.credentials=(provider,item,crypt(base64.b64decode(chosen['value']),decrypt=True).decode())
+    except Exception:
+        release_binding()
+        raise
+
+
+def release_binding():
+    identity=getattr(_bound,'identity',None)
+    if identity:
+        with _key_lock:
+            _key_active[identity]=max(0,_key_active.get(identity,1)-1)
+    _bound.credentials=None
+    _bound.identity=None
+
+
+def quarantine_binding(message):
+    identity=getattr(_bound,'identity',None)
+    if identity:
+        with _key_lock:
+            _key_failures[identity]=message
+        return True
+    return False
 
 
 def ready():
@@ -121,8 +262,11 @@ def ready():
         except ValueError as exc:
             configured = False
             reason = str(exc)
+    with connect() as c: pool=pool_status(c)
+    temporary=not configured and pool['cooling']>0
+    if temporary: reason='密钥正在限流冷却，任务排队等待恢复'
     return {'available': True, 'logged_in': configured, 'mode': 'api', 'provider': provider,
-            'name': item['name'], 'reason': reason}
+            'name': item['name'], 'reason': reason,'temporarily_unavailable':temporary,'key_pool':pool}
 
 
 def build_request(provider, item, images, prompt, schema, probe=False):
@@ -170,6 +314,7 @@ def request(provider, item, key, body, timeout, cancel, workspace=None):
     result = queue.Queue()
     client = httpx.Client(timeout=httpx.Timeout(45, connect=10), follow_redirects=False)
     started = time.monotonic()
+    identity = getattr(_bound,'identity',None)
     def run():
         try:
             output = []
@@ -179,12 +324,15 @@ def request(provider, item, key, body, timeout, cancel, workspace=None):
             finished = False
             with client.stream('POST', item['url'] + '/chat/completions', headers={'Authorization': 'Bearer ' + key}, json=body) as response:
                 receipt = {'provider': provider, 'model': item.get('model', ''), 'endpoint': item['url'], 'http_status': response.status_code,
-                           'request_id': response.headers.get('x-request-id', response.headers.get('request-id', '')), 'usage': None}
+                           'request_id': response.headers.get('x-request-id', response.headers.get('request-id', '')), 'usage': None,
+                           'key_id': identity[1] if identity else None}
                 if workspace:
                     (workspace / 'receipt.json').write_text(json.dumps(receipt), encoding='utf-8')
                 if response.status_code != 200:
-                    message = {401: '密钥无效或已失效', 403: '账号或模型权限不足', 404: '模型或 API 地址不存在', 429: '额度不足或触发频率限制（429），队列将暂停'}.get(response.status_code, '服务商请求失败')
-                    raise ValueError(f'{message}，HTTP {response.status_code}；请在服务商控制台核对')
+                    message = {401: '密钥无效或已失效', 403: '账号或模型权限不足', 404: '模型或 API 地址不存在', 429: '额度不足或触发频率限制（429），任务将排队等待'}.get(response.status_code, '服务商请求失败')
+                    try: retry_after=max(1,min(3600,float(response.headers.get('retry-after','60'))))
+                    except ValueError: retry_after=60
+                    raise ProviderRejected(response.status_code,f'{message}，HTTP {response.status_code}；请在服务商控制台核对',retry_after)
                 for line in response.iter_lines():
                     if cancel() or time.monotonic() - started > timeout:
                         raise ValueError('API 分析已暂停或超时')
@@ -258,19 +406,31 @@ def infer(workspace, images, prompt, schema, timeout, model, cancel):
     provider, item, key = credentials()
     body = build_request(provider, item, images, prompt, schema)
     (workspace / 'transport.json').write_text(json.dumps({'provider': provider, 'model': item['model'], 'started_at': time.time()}), encoding='utf-8')
-    raw = request(provider, item, key, body, timeout, cancel, workspace)
+    try:
+        raw = request(provider, item, key, body, timeout, cancel, workspace)
+    except ValueError as exc:
+        if any(code in str(exc) for code in ('HTTP 401','HTTP 403')):
+            quarantine_binding('密钥无效或权限不足；请修正并保存配置')
+        if isinstance(exc,ProviderRejected) and exc.status_code==429:
+            identity=getattr(_bound,'identity',None)
+            if identity:
+                with _key_lock: _key_cooldowns[identity]=time.monotonic()+exc.retry_after
+        raise
     (workspace / 'response.json').write_text(raw, encoding='utf-8')
     return raw
 
 
 def test_connection():
+    from .auto_analysis_service import _execution_lock
+    if _execution_lock.locked(): raise ValueError('请先暂停分析并等待请求停止，再测试密钥')
     import pymupdf
+    from .pdf_service import PDF_LOCK
     import tempfile
     from pathlib import Path
     provider, item, key = credentials()
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / 'test.png'
-        with pymupdf.open() as document:
+        with PDF_LOCK, pymupdf.open() as document:
             page = document.new_page(width=320, height=100)
             page.insert_text((20, 55), 'VISION TEST 4827', fontsize=24)
             page.get_pixmap(alpha=False).save(path)

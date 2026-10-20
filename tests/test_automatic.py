@@ -113,14 +113,14 @@ def test_pause_does_not_commit_inflight_response(library, monkeypatch):
     assert calls == [1]
 
 
-def test_page_count_mismatch_rejects_before_model_call(library, monkeypatch):
+def test_page_limit_rejects_before_model_call(library, monkeypatch):
     client, pid, paper = library
     calls = transport(monkeypatch, payload(paper))
     with connect() as c:
         c.execute('UPDATE papers SET page_count=99 WHERE id=?', (pid,))
     ai.analyze_one(ai.enqueue(pid))
     assert not calls
-    assert '不一致' in client.get('/api/ai/jobs').json()[0]['error']
+    assert '页数' in client.get('/api/ai/jobs').json()[0]['error']
 
 
 def test_quota_limit_pauses_batch_without_erasing_data(library, monkeypatch):

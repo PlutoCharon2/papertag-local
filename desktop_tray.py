@@ -46,7 +46,7 @@ class DesktopTray:
         self.icon.Text = '垃圾桶 · 科研文献库'
         self.icon.Icon = Icon.ExtractAssociatedIcon(os.sys.executable) or SystemIcons.Application
         self.icon.ContextMenuStrip = menu
-        self.icon.DoubleClick += self.show
+        self.icon.MouseClick += self.on_click
         self.icon.Visible = True
         self.window.native.FormClosing += self.on_closing
         self.window.native.FormClosed += self.on_closed
@@ -56,6 +56,11 @@ class DesktopTray:
         self.timer.Interval = 250
         self.timer.Tick += self.check_activation
         self.timer.Start()
+
+    def on_click(self, sender, event):
+        from System.Windows.Forms import MouseButtons
+        if event.Button == MouseButtons.Left:
+            self.show()
 
     def check_activation(self, *args):
         if self.activation_request.exists():

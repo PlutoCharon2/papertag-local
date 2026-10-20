@@ -105,3 +105,19 @@ a { color: var(--accent); text-underline-offset: 3px; }
 aside,.paper-column,.content,dialog { scrollbar-width: thin; scrollbar-color: #becbd5 transparent; }
 @media(max-width:800px) { .ontology-row { grid-template-columns: 1fr; gap: 6px; } }
 @media(prefers-reduced-motion:reduce) { button,.paper-card { transition: none; } }
+
+.reader-tools .favorite-toggle{font-size:19px;line-height:20px;width:32px;padding:3px 0;color:#657887;background:transparent;border-color:transparent}.reader-tools .favorite-toggle:hover{background:#fff7e4;color:#947020}.reader-tools .favorite-toggle.is-favorite{color:#947020;background:#fff7e4}.paper-favorite-star,.favorite-filter>span{color:#947020}.favorite-filter{margin-top:12px;margin-bottom:6px;font-weight:600}
+
+/* Review state is visible at a glance; unclassified chips retain their neutral color. */
+#tagReviewDialog .chip{background:transparent;border:0;border-radius:0;color:#657887}
+#tagReviewDialog .chip.manual,#tagReviewDialog .chip.accepted{color:#164c91}
+#tagReviewDialog .chip.rejected{color:#a12626}
+#tagReviewDialog .validation-issues{background:transparent;border:0;padding:0 0 14px;color:#657887}
+#tagReviewDialog .validation-issues li{color:#9b7000;font-size:15px;line-height:1.7}
+.paper-card .chip.ai,.paper-card .chip.manual,.paper-card .chip.accepted,.paper-card .chip.rejected{background:#fff1bc;color:#785500;border:1px solid #e3be51}
+#tagReviewDialog .tag-review .chip{font-size:16px;font-weight:650;line-height:1.5;padding:5px 10px}
+#tagReviewDialog .tag-review summary{font-size:13px;font-weight:400;color:#64737d}
+#tagReviewDialog .tag-review button{font-size:12px;padding:5px 9px}
+#aiJobs .task-paper-link{border:0;background:transparent;padding:2px 0;color:var(--accent);font-size:14px;font-weight:650;text-align:left;line-height:1.6}
+#aiJobs .task-paper-link:hover{text-decoration:underline;background:#edf5f5}
+#aiJobs .task-paper-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}

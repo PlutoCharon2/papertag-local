@@ -6,7 +6,7 @@ Uninstallable=no
 AppId={{4F6AB230-8EBE-4D52-A6B2-EF6F61C21B24}
 #endif
 AppName=PaperTag Local
-AppVersion=0.7.10
+AppVersion=0.7.22
 AppPublisher=PaperTag Local contributors
 DefaultDirName={localappdata}\Programs\ResearchLiteratureLibrary
 DefaultGroupName=垃圾桶科研文献库
@@ -21,7 +21,7 @@ OutputDir=tmp
 OutputBaseFilename=validation-setup
 #else
 OutputDir=release
-OutputBaseFilename=PaperTagLocal-Setup-0.7.10
+OutputBaseFilename=PaperTagLocal-Setup-0.7.22
 #endif
 Compression=lzma2
 SolidCompression=yes

@@ -1,9 +1,11 @@
 import hashlib
 import json
+import threading
 import pymupdf as fitz
 from pathlib import Path
 
 PARSER_VERSION = 'pymupdf-blocks-v1'
+PDF_LOCK = threading.RLock()
 
 
 def file_hash(path: Path):
@@ -18,7 +20,7 @@ def parse_pdf(path: Path):
     digest = file_hash(path)
     blocks = []
     low_pages = []
-    with fitz.open(str(path)) as doc:
+    with PDF_LOCK, fitz.open(str(path)) as doc:
         if doc.needs_pass:
             raise ValueError('PDF 有密码，暂不支持解密导入')
         if not len(doc):

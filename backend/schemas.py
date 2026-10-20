@@ -81,6 +81,11 @@ class SearchInput(StrictModel):
     reviewed_only: bool = False
     pending_only: bool = False
     show_versions: bool = False
+    favorites_only: bool = False
+
+
+class FavoriteInput(StrictModel):
+    is_favorite: bool
 
 
 class LabelEdit(StrictModel):
@@ -108,13 +113,29 @@ class AISettings(StrictModel):
     model: str = Field(default='', max_length=100, pattern=r'^[a-zA-Z0-9._/-]*$')
 
 
+class APIKeyInput(StrictModel):
+    id: str = Field(default='', max_length=80, pattern=r'^[a-zA-Z0-9_-]*$')
+    value: str = Field(default='', max_length=1000)
+    enabled: bool = True
+
+
+class KeyViewRequest(StrictModel):
+    provider: Literal['qwen', 'doubao', 'deepseek', 'zhipu']
+
+
 class APIProfile(StrictModel):
     provider: Literal['qwen', 'doubao', 'deepseek', 'zhipu']
     url: str = Field(min_length=8, max_length=300)
     model: str = Field(min_length=1, max_length=150)
     api_key: str = Field(default='', max_length=1000)
     clear_key: bool = False
+    keys: list[APIKeyInput] | None = Field(default=None, max_length=64)
 
 
 class JournalInput(StrictModel):
     journal: str = Field(max_length=500)
+
+
+class RefreshSettings(StrictModel):
+    enabled: bool = True
+    interval_minutes: int = Field(default=20, ge=1, le=1440)
